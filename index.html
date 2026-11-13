@@ -90,22 +90,36 @@ function buildSnapshot(parsedFiles) {
   if (!followingFile) throw new Error("No following file found. It must contain 'relationships_following'.");
   if (followerFiles.length === 0) throw new Error("No followers file found.");
 
-  const following = followingFile.relationships_following.flatMap((account) =>
-    account.title ? [account.title] : usernamesFromEntries(account.string_list_data)
+  const followingAccounts = followingFile.relationships_following.flatMap((account) =>
+    account.title
+      ? [{ username: account.title, timestamp: account.string_list_data?.[0]?.timestamp }]
+      : accountsFromEntries(account.string_list_data)
   );
-  const followers = followerFiles.flat().flatMap((account) => usernamesFromEntries(account.string_list_data));
+  const followerAccounts = followerFiles.flat().flatMap((account) => accountsFromEntries(account.string_list_data));
 
   return {
     date: new Date().toISOString(),
-    following: uniqueSorted(following),
-    followers: uniqueSorted(followers),
+    following: uniqueSorted(followingAccounts.map((account) => account.username)),
+    followers: uniqueSorted(followerAccounts.map((account) => account.username)),
+    followingSince: sinceByUsername(followingAccounts),
+    followersSince: sinceByUsername(followerAccounts),
   };
 }
 
-function usernamesFromEntries(entries = []) {
+function accountsFromEntries(entries = []) {
   return entries
-    .map((entry) => entry.value || entry.href?.replace(/\/+$/, "").split("/").pop() || "")
-    .filter(Boolean);
+    .map((entry) => ({
+      username: entry.value || entry.href?.replace(/\/+$/, "").split("/").pop() || "",
+      timestamp: entry.timestamp,
+    }))
+    .filter((account) => account.username);
+}
+
+function sinceByUsername(accounts) {
+  const entries = accounts
+    .filter((account) => account.timestamp)
+    .map((account) => [account.username.trim().toLowerCase(), account.timestamp]);
+  return Object.fromEntries(entries);
 }
 
 function uniqueSorted(usernames) {
@@ -133,16 +147,22 @@ function renderResults(snapshot, baseline) {
     const unfollowedYouButIFollow = intersection(unfollowedYou, snapshot.following);
     const newFollowers = difference(snapshot.followers, baseline.followers);
 
-    addSection("Unfollowed you, and you still follow them", unfollowedYouButIFollow, true);
-    addSection("Unfollowed you since last time", unfollowedYou, true);
-    addSection("New followers", newFollowers, false);
+    const baselineFollowersSince = baseline.followersSince || {};
+    addSection("Unfollowed you, and you still follow them", unfollowedYouButIFollow, true, "followed you", baselineFollowersSince);
+    addSection("Unfollowed you since last time", unfollowedYou, true, "followed you", baselineFollowersSince);
+    addSection("New followers", newFollowers, false, "followed you", snapshot.followersSince);
   } else {
     statusElement.textContent += " No baseline saved yet, so only the follow-back check is shown.";
   }
-  addSection("Not following you back", difference(snapshot.following, snapshot.followers), false);
+  const notFollowingBack = difference(snapshot.following, snapshot.followers);
+  addSection("Not following you back", notFollowingBack, false, "you followed", snapshot.followingSince);
 }
 
-function addSection(title, usernames, open) {
+function formatDate(timestamp) {
+  return new Date(timestamp * 1000).toLocaleDateString(undefined, { day: "numeric", month: "short", year: "numeric" });
+}
+
+function addSection(title, usernames, open, dateLabel, sinceByUsername) {
   const section = document.createElement("details");
   section.open = open;
 
@@ -159,6 +179,14 @@ function addSection(title, usernames, open) {
     link.rel = "noopener";
     link.textContent = `@${username}`;
     item.append(link);
+
+    const timestamp = sinceByUsername?.[username.toLowerCase()];
+    if (timestamp) {
+      const dateElement = document.createElement("span");
+      dateElement.className = "muted";
+      dateElement.textContent = ` · ${dateLabel} ${formatDate(timestamp)}`;
+      item.append(dateElement);
+    }
     list.append(item);
   });
   section.append(list);
