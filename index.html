@@ -1,0 +1,216 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Follower Tracker</title>
+<style>
+  body { font-family: -apple-system, system-ui, sans-serif; margin: 0 auto; padding: 16px; max-width: 640px; }
+  button, input[type=file]::file-selector-button { font-size: 16px; padding: 10px 14px; margin: 4px 4px 4px 0; }
+  details { margin: 12px 0; border: 1px solid #ccc; border-radius: 8px; padding: 8px 12px; }
+  summary { font-weight: 600; font-size: 17px; }
+  li { margin: 6px 0; }
+  .muted { color: #666; font-size: 14px; }
+  .status { margin: 12px 0; font-weight: 600; }
+</style>
+</head>
+<body>
+<h1>Follower Tracker</h1>
+<p class="muted">Everything runs in your browser. Nothing is uploaded anywhere.</p>
+
+<p>1. Select your export files (following.json and every followers_N.json):</p>
+<input type="file" id="exportFiles" accept=".json,application/json" multiple>
+
+<p>2. Compare:</p>
+<button id="compareButton">Compare</button>
+
+<div class="status" id="status"></div>
+<div id="results"></div>
+
+<hr>
+<p class="muted" id="baselineInfo"></p>
+<button id="saveBaselineButton" disabled>Save as new baseline</button>
+<button id="exportBaselineButton">Back up baseline</button>
+<button id="importBaselineButton">Restore baseline</button>
+<input type="file" id="importBaselineFile" accept=".json,application/json" hidden>
+
+<script>
+const BASELINE_STORAGE_KEY = "followerTrackerBaseline";
+
+const exportFilesInput = document.getElementById("exportFiles");
+const statusElement = document.getElementById("status");
+const resultsElement = document.getElementById("results");
+const baselineInfoElement = document.getElementById("baselineInfo");
+const saveBaselineButton = document.getElementById("saveBaselineButton");
+const importBaselineFile = document.getElementById("importBaselineFile");
+
+let currentSnapshot = null;
+
+document.getElementById("compareButton").addEventListener("click", compare);
+saveBaselineButton.addEventListener("click", saveBaseline);
+document.getElementById("exportBaselineButton").addEventListener("click", exportBaseline);
+document.getElementById("importBaselineButton").addEventListener("click", () => importBaselineFile.click());
+importBaselineFile.addEventListener("change", importBaseline);
+
+showBaselineInfo();
+
+async function compare() {
+  try {
+    resultsElement.replaceChildren();
+    const files = Array.from(exportFilesInput.files);
+    if (files.length < 2) throw new Error("Select following.json and at least one followers file.");
+
+    currentSnapshot = buildSnapshot(await readExports(files));
+    renderResults(currentSnapshot, loadBaseline());
+    saveBaselineButton.disabled = false;
+  } catch (error) {
+    statusElement.textContent = error.message;
+  }
+}
+
+async function readExports(files) {
+  const parsedFiles = [];
+  for (const file of files) {
+    const text = (await file.text()).replace(/^\uFEFF/, "");
+    try {
+      parsedFiles.push(JSON.parse(text));
+    } catch (error) {
+      throw new Error(`Could not read ${file.name} as JSON.`);
+    }
+  }
+  return parsedFiles;
+}
+
+function buildSnapshot(parsedFiles) {
+  const followingFile = parsedFiles.find((data) => !Array.isArray(data) && data.relationships_following);
+  const followerFiles = parsedFiles.filter(Array.isArray);
+
+  if (!followingFile) throw new Error("No following file found. It must contain 'relationships_following'.");
+  if (followerFiles.length === 0) throw new Error("No followers file found.");
+
+  const following = followingFile.relationships_following.flatMap((account) =>
+    account.title ? [account.title] : usernamesFromEntries(account.string_list_data)
+  );
+  const followers = followerFiles.flat().flatMap((account) => usernamesFromEntries(account.string_list_data));
+
+  return {
+    date: new Date().toISOString(),
+    following: uniqueSorted(following),
+    followers: uniqueSorted(followers),
+  };
+}
+
+function usernamesFromEntries(entries = []) {
+  return entries
+    .map((entry) => entry.value || entry.href?.replace(/\/+$/, "").split("/").pop() || "")
+    .filter(Boolean);
+}
+
+function uniqueSorted(usernames) {
+  const byLowercase = new Map();
+  usernames.map((username) => username.trim()).filter(Boolean).forEach((username) => {
+    byLowercase.set(username.toLowerCase(), username);
+  });
+  return Array.from(byLowercase.values()).sort((first, second) => first.localeCompare(second));
+}
+
+function difference(source, excluded) {
+  const excludedLowercase = new Set(excluded.map((username) => username.toLowerCase()));
+  return source.filter((username) => !excludedLowercase.has(username.toLowerCase()));
+}
+
+function intersection(first, second) {
+  return difference(first, difference(first, second));
+}
+
+function renderResults(snapshot, baseline) {
+  statusElement.textContent = `${snapshot.followers.length} followers, following ${snapshot.following.length}.`;
+
+  if (baseline) {
+    const unfollowedYou = difference(baseline.followers, snapshot.followers);
+    const unfollowedYouButIFollow = intersection(unfollowedYou, snapshot.following);
+    const newFollowers = difference(snapshot.followers, baseline.followers);
+
+    addSection("Unfollowed you, and you still follow them", unfollowedYouButIFollow, true);
+    addSection("Unfollowed you since last time", unfollowedYou, true);
+    addSection("New followers", newFollowers, false);
+  } else {
+    statusElement.textContent += " No baseline saved yet, so only the follow-back check is shown.";
+  }
+  addSection("Not following you back", difference(snapshot.following, snapshot.followers), false);
+}
+
+function addSection(title, usernames, open) {
+  const section = document.createElement("details");
+  section.open = open;
+
+  const heading = document.createElement("summary");
+  heading.textContent = `${title} (${usernames.length})`;
+  section.append(heading);
+
+  const list = document.createElement("ol");
+  usernames.forEach((username) => {
+    const item = document.createElement("li");
+    const link = document.createElement("a");
+    link.href = `https://www.instagram.com/${encodeURIComponent(username)}/`;
+    link.target = "_blank";
+    link.rel = "noopener";
+    link.textContent = `@${username}`;
+    item.append(link);
+    list.append(item);
+  });
+  section.append(list);
+  resultsElement.append(section);
+}
+
+function loadBaseline() {
+  const stored = localStorage.getItem(BASELINE_STORAGE_KEY);
+  return stored ? JSON.parse(stored) : null;
+}
+
+function saveBaseline() {
+  localStorage.setItem(BASELINE_STORAGE_KEY, JSON.stringify(currentSnapshot));
+  saveBaselineButton.disabled = true;
+  showBaselineInfo();
+  statusElement.textContent = "Baseline saved. Future comparisons will use this export.";
+}
+
+function showBaselineInfo() {
+  const baseline = loadBaseline();
+  baselineInfoElement.textContent = baseline
+    ? `Baseline saved ${new Date(baseline.date).toLocaleString()} (${baseline.followers.length} followers).`
+    : "No baseline saved yet.";
+}
+
+function exportBaseline() {
+  const baseline = loadBaseline();
+  if (!baseline) {
+    statusElement.textContent = "Nothing to back up yet.";
+    return;
+  }
+  const blob = new Blob([JSON.stringify(baseline, null, 2)], { type: "application/json" });
+  const link = document.createElement("a");
+  link.href = URL.createObjectURL(blob);
+  link.download = `follower-baseline-${baseline.date.slice(0, 10)}.json`;
+  link.click();
+  URL.revokeObjectURL(link.href);
+}
+
+async function importBaseline() {
+  try {
+    const baseline = JSON.parse(await importBaselineFile.files[0].text());
+    if (!Array.isArray(baseline.followers) || !Array.isArray(baseline.following)) {
+      throw new Error("That is not a baseline backup file.");
+    }
+    localStorage.setItem(BASELINE_STORAGE_KEY, JSON.stringify(baseline));
+    showBaselineInfo();
+    statusElement.textContent = "Baseline restored.";
+  } catch (error) {
+    statusElement.textContent = error.message;
+  }
+}
+</script>
+</body>
+</html>
